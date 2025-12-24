@@ -5,3 +5,9 @@ compatibility_date = "2024-01-01"
 # 使用自定义域名（Wrangler 2.0+ 推荐方式）
 [env.production]
 routes = [{ pattern = "arch.sycamore.icu", zone_name = "sycamore.icu" }]
+
+# 添加模块规则，允许导入 .sh 文件作为文本
+[[rules]]
+type = "Text"
+globs = ["*.sh"]
+fallthrough = true
