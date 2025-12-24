@@ -1,4 +1,4 @@
-name = "SycamoreArchSetup"
+name = "sycamore-arch-setup"
 main = "worker.js"
 
 routes = [{ pattern = "arch.sycamore.icu", zone_name = "sycamore.icu" }]
