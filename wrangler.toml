@@ -2,9 +2,9 @@ name = "sycamore-arch-setup"
 main = "worker.js"
 compatibility_date = "2025-12-24"
 
+# 路由配置
 routes = [{ pattern = "arch.sycamore.icu", zone_name = "sycamore.icu" }]
 
-[[rules]]
-type = "Text"
-globs = ["*.sh"]
-fallthrough = true
+[assets]
+directory = "./public"
+binding = "ASSETS"     # 在代码中通过 env.ASSETS 访问
