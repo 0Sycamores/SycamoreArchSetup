@@ -69,7 +69,7 @@ if [[ "${COLOR_SUPPORT}" == "true" ]]; then
     HIDDEN='\033[8m'
     
     # 语义化颜色
-    INFO="${BOLD_WHITE}"
+    INFO="${BOLD_BLUE}"
     SUCCESS="${BOLD_GREEN}"
     WARNING="${BOLD_YELLOW}"
     ERROR="${BOLD_RED}"
@@ -106,14 +106,102 @@ EOF
     echo ""
 }
 
+# 检查 Root 权限
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        error "此脚本需要 Root 权限。 请使用 ${BOLD_WHITE}sudo${RESET} 运行或切换到 ${BOLD_WHITE}root${RESET} 用户。"
+        exit 1
+    fi
+}
+
+# 打印系统信息
+system_information() {
+    local distro="Unknown"
+    
+    # 尝试获取 Linux 发行版名称
+    if [ -f /etc/os-release ]; then
+        distro=$(grep -E "^PRETTY_NAME=" /etc/os-release | cut -d'=' -f2 | tr -d '"')
+    elif [ -f /etc/issue ]; then
+        distro=$(head -n 1 /etc/issue)
+    fi
+
+    # 获取 CPU 型号
+    local cpu_info=""
+    if [ -f /proc/cpuinfo ]; then
+        cpu_info=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//')
+    fi
+
+    # 获取内存信息
+    local mem_total=""
+    local mem_used=""
+    local mem_available=""
+    local swap_total=""
+    local swap_used=""
+    if command -v free &> /dev/null; then
+        mem_total=$(free -h | awk '/^Mem:/ {print $2}')
+        mem_used=$(free -h | awk '/^Mem:/ {print $3}')
+        mem_available=$(free -h | awk '/^Mem:/ {print $7}')
+        swap_total=$(free -h | awk '/^Swap:/ {print $2}')
+        swap_used=$(free -h | awk '/^Swap:/ {print $3}')
+    fi
+
+    # 获取硬盘信息
+    local disk_used=""
+    local disk_total=""
+    local fs_type=""
+    if command -v df &> /dev/null; then
+        disk_used=$(df -h / | awk 'NR==2 {print $3}')
+        disk_total=$(df -h / | awk 'NR==2 {print $2}')
+        fs_type=$(df -T / | awk 'NR==2 {print $2}')
+    fi
+
+    # 打印系统信息
+    echo -e "${INFO}[SYSTEM]${RESET}     操作系统信息"
+    echo -e "  ${BOLD_WHITE}OS:${RESET}        ${distro}"
+    echo -e "  ${BOLD_WHITE}Kernel:${RESET}    $(uname -r)"
+    echo -e "  ${BOLD_WHITE}Arch:${RESET}      $(uname -m)"
+    echo -e "  ${BOLD_WHITE}CPU:${RESET}       ${cpu_info}"
+    echo -e "  ${BOLD_WHITE}Memory:${RESET}    ${mem_used} / ${mem_total}  Swap: ${swap_used} / ${swap_total}"
+    echo -e "  ${BOLD_WHITE}Disk:${RESET}      ${disk_used} / ${disk_total} (${fs_type})"
+    echo -e "  ${BOLD_WHITE}User:${RESET}      $(whoami)@$(hostname 2>/dev/null || echo "")"
+    echo ""
+}
+
+# 检查系统要求
+check_system_requirements() {
+    info "正在检查系统环境..."
+
+    # 1. 检查是否为 Arch Linux
+    if [[ ! -f /etc/arch-release ]]; then
+        error "检测到非 Arch Linux 系统。停止安装。"
+        exit 1
+    fi
+
+    # 2. 检查根文件系统是否为 Btrfs
+    local fs_type=$(df -T / | awk 'NR==2 {print $2}')
+    if [[ "$fs_type" != "btrfs" ]]; then
+        error "根文件系统不是 Btrfs (检测到: ${fs_type}), 停止安装。"
+        exit 1
+    fi
+
+    # 3. 检查磁盘剩余空间 (>10GB)
+    local available_kb=$(df -k / | awk 'NR==2 {print $4}')
+    if [[ $available_kb -lt 10485760 ]]; then
+        error "磁盘空间不足。需要至少 10GB 可用空间。"
+        exit 1
+    fi
+
+    success "系统环境检查通过。"
+}
+
 # 打印信息
 info() {
-    echo -e "${INFO}[INFO]${RESET} $*"
+    echo -e "${INFO}[INFO] ${RESET} $*"
 }
 
 # 打印成功消息
 success() {
-    echo -e "${SUCCESS}[✓]${RESET} $*"
+    echo -e "${SUCCESS}[SUCCESS]${RESET} $*"
 }
 
 # 打印警告
@@ -138,8 +226,11 @@ debug() {
 # ==============================================================================
 
 main() {
-    # 显示 Banner
     show_banner
+    check_root
+    system_information
+    check_system_requirements
+
     success "Setup completed successfully!"
 }
 
@@ -148,4 +239,5 @@ trap 'echo -e "\n${RED}[!] Script interrupted by user.${RESET}"; exit 1' SIGINT
 
 # 执行主函数
 main "$@"
+
 
