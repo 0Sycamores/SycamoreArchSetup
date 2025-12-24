@@ -35,7 +35,8 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+          # 显式指定部署环境，使用 inputs 输入或默认为 'production'
+          command: deploy --env ${{ github.event.inputs.environment || 'production' }}
         env:
           ENVIRONMENT: ${{ github.event.inputs.environment || 'production' }}
 
