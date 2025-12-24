@@ -2,7 +2,7 @@
 #
 # 名称:     Sycamore Arch Setup
 #
-# 用法:     bash <(wget -qO- arch.sycamore.icu)
+# 用法:     bash <(curl -sL arch.sycamore.icu)
 #
 # ==============================================================================
 
@@ -69,13 +69,13 @@ if [[ "${COLOR_SUPPORT}" == "true" ]]; then
     HIDDEN='\033[8m'
     
     # 语义化颜色
-    INFO="${BOLD_BLUE}"
+    INFO="${BOLD_WHITE}"
     SUCCESS="${BOLD_GREEN}"
     WARNING="${BOLD_YELLOW}"
     ERROR="${BOLD_RED}"
-    DEBUG="${CYAN}"
-    HEADER="${BOLD_MAGENTA}"
-    PROMPT="${BOLD_CYAN}"
+    DEBUG="${DIM}"
+    HEADER="${BOLD_RED}"
+    PROMPT="${BOLD_RED}"
 else
     # 如果不支持颜色，禁用所有颜色代码
     RESET='' BLACK='' RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN='' WHITE=''
@@ -87,7 +87,8 @@ fi
 
 # 打印Banner
 show_banner() {
-    echo -e "${MAGENTA}"
+    clear
+    echo -e "${BOLD_RED}"
     cat << 'EOF'
     ███████╗██╗   ██╗ ██████╗ █████╗ ███╗   ███╗ ██████╗ ██████╗ ███████╗
     ██╔════╝╚██╗ ██╔╝██╔════╝██╔══██╗████╗ ████║██╔═══██╗██╔══██╗██╔════╝
@@ -97,73 +98,39 @@ show_banner() {
     ╚══════╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝
 EOF
     echo -e "${RESET}"
-    echo -e "${BOLD_CYAN}    ╔═══════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${BOLD_CYAN}    ║  ${MAGENTA}◢◤${BOLD_MAGENTA} ARCH LINUX SETUP ${MAGENTA}◥◣${BOLD_CYAN}                                    ║${RESET}"
-    echo -e "${BOLD_CYAN}    ║  ${YELLOW}▸${BOLD_YELLOW} Cyberpunk Edition ${YELLOW}◂${BOLD_CYAN}                                    ║${RESET}"
-    echo -e "${BOLD_CYAN}    ║  ${GREEN}✧${BOLD_GREEN} Version ${VERSION} ${GREEN}✧${BOLD_CYAN}                                        ║${RESET}"
-    echo -e "${BOLD_CYAN}    ╚═══════════════════════════════════════════════════════════════╝${RESET}"
+    echo -e "${DIM}    ╔═══════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${DIM}    ║  ${BOLD_RED}◢◤${BOLD_WHITE} ARCH LINUX SETUP ${BOLD_RED}◥◣${RESET}${DIM}                                           ║${RESET}"
+    echo -e "${DIM}    ║  ${YELLOW}▸${BOLD_YELLOW} Sycamore Edition ${YELLOW}◂${RESET}${DIM}                                             ║${RESET}"
+    echo -e "${DIM}    ║  ${DIM}✧${BOLD_WHITE} Version ${VERSION} ${DIM}✧${RESET}${DIM}                                                ║${RESET}"
+    echo -e "${DIM}    ╚═══════════════════════════════════════════════════════════════════╝${RESET}"
     echo ""
 }
 
 # 打印信息
-print_info() {
+info() {
     echo -e "${INFO}[INFO]${RESET} $*"
 }
 
 # 打印成功消息
-print_success() {
+success() {
     echo -e "${SUCCESS}[✓]${RESET} $*"
 }
 
 # 打印警告
-print_warning() {
+warn() {
     echo -e "${WARNING}[WARNING]${RESET} $*"
 }
 
 # 打印错误
-print_error() {
+error() {
     echo -e "${ERROR}[ERROR]${RESET} $*" >&2
 }
 
 # 打印调试信息
-print_debug() {
+debug() {
     if [[ "${DEBUG_MODE:-0}" == "1" ]]; then
         echo -e "${DEBUG}[DEBUG]${RESET} $*"
     fi
-}
-
-# 打印标题
-print_header() {
-    echo ""
-    echo -e "${HEADER}╔══════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${HEADER}║${RESET} $*"
-    echo -e "${HEADER}╚══════════════════════════════════════════════════════════════╝${RESET}"
-    echo ""
-}
-
-# 打印分隔线
-print_separator() {
-    echo -e "${DIM}────────────────────────────────────────────────────────────────${RESET}"
-}
-
-# 提示用户输入
-prompt_input() {
-    echo -ne "${PROMPT}➜${RESET} $* "
-}
-
-# 进度指示器
-show_spinner() {
-    local pid=$1
-    local delay=0.1
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    while ps -p "$pid" > /dev/null 2>&1; do
-        local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-    done
-    printf "    \b\b\b\b"
 }
 
 # ==============================================================================
@@ -173,26 +140,7 @@ show_spinner() {
 main() {
     # 显示 Banner
     show_banner
-
-    # 检查是否以 root 权限运行
-    if [[ $EUID -ne 0 ]]; then
-       print_error "This script must be run as root"
-       exit 1
-    fi
-
-    print_header "Initializing System Setup"
-    print_info "Starting Sycamore Arch Setup v${VERSION}..."
-    
-    # 示例流程
-    print_info "Checking system requirements..."
-    sleep 1
-    print_success "System check passed."
-
-    # 这里可以添加后续的菜单或安装逻辑
-    # menu_loop
-    
-    print_separator
-    print_success "Setup completed successfully!"
+    success "Setup completed successfully!"
 }
 
 # 捕获 Ctrl+C
