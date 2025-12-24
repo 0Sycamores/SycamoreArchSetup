@@ -13,6 +13,9 @@
 VERSION="0.1.0"
 AUTHER='Sycamore'
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUTO_INSTALL=false
+# 开发模式通过环境变量 DEV_MODE=1 启用
+DEV_MODE="${DEV_MODE:-0}"
 
 
 # ==============================================================================
@@ -169,26 +172,42 @@ system_information() {
 
 # 检查系统要求
 check_system_requirements() {
+    if [[ "${DEV_MODE}" == "1" ]]; then
+        warn "Running in DEV MODE - system checks will be skipped on failure"
+    fi
+    
     info "Checking system requirements..."
 
     # 1. 检查是否为 Arch Linux
     if [[ ! -f /etc/arch-release ]]; then
-        error "Non-Arch Linux system detected. Installation stopped."
-        exit 1
+        if [[ "${DEV_MODE}" == "1" ]]; then
+            warn "Non-Arch Linux system detected. ${DIM}(Skipped in dev mode)${RESET}"
+        else
+            error "Non-Arch Linux system detected. Installation stopped."
+            exit 1
+        fi
     fi
 
     # 2. 检查根文件系统是否为 Btrfs
     local fs_type=$(df -T / | awk 'NR==2 {print $2}')
     if [[ "$fs_type" != "btrfs" ]]; then
-        error "Root filesystem is not Btrfs (detected: ${fs_type}). Installation stopped."
-        exit 1
+        if [[ "${DEV_MODE}" == "1" ]]; then
+            warn "Root filesystem is not Btrfs (detected: ${fs_type}). ${DIM}(Skipped in dev mode)${RESET}"
+        else
+            error "Root filesystem is not Btrfs (detected: ${fs_type}). Installation stopped."
+            exit 1
+        fi
     fi
 
     # 3. 检查磁盘剩余空间 (>10GB)
     local available_kb=$(df -k / | awk 'NR==2 {print $4}')
     if [[ $available_kb -lt 10485760 ]]; then
-        error "Insufficient disk space. At least 10GB of available space is required."
-        exit 1
+        if [[ "${DEV_MODE}" == "1" ]]; then
+            warn "Insufficient disk space. ${DIM}(Skipped in dev mode)${RESET}"
+        else
+            error "Insufficient disk space. At least 10GB of available space is required."
+            exit 1
+        fi
     fi
 
     success "System checks passed."
@@ -196,7 +215,7 @@ check_system_requirements() {
 
 # 打印信息
 info() {
-    echo -e "${INFO}[INFO] ${RESET} $*"
+    echo -e "${INFO}[INFO]   ${RESET} $*"
 }
 
 # 打印成功消息
@@ -221,6 +240,123 @@ debug() {
     fi
 }
 
+# 询问用户是否全自动安装
+prompt_auto_install() {
+    echo ""
+    echo -e "${PROMPT}╔═══════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${PROMPT}║  ${BOLD_WHITE}Installation Mode Selection${RESET}${PROMPT}                                      ║${RESET}"
+    echo -e "${PROMPT}╚═══════════════════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    
+    while true; do
+        read -p "$(echo -e "${PROMPT}Enable automatic installation? [y/N]:${RESET} ")" choice
+        # 默认选择交互式安装 (No)
+        choice=${choice:-n}
+        case $choice in
+            y|Y|yes|YES)
+                AUTO_INSTALL=true
+                success "Automatic installation mode selected"
+                echo ""
+                break
+                ;;
+            n|N|no|NO|"")
+                AUTO_INSTALL=false
+                success "Interactive installation mode selected"
+                echo ""
+                break
+                ;;
+            *)
+                error "Invalid option. Please enter Y or N"
+                ;;
+        esac
+    done
+}
+
+# 更新镜像源为最快的源
+update_mirrorlist() {
+    echo ""
+    echo -e "${PROMPT}╔═══════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${PROMPT}║  ${BOLD_WHITE}Mirror List Optimization${RESET}${PROMPT}                                         ║${RESET}"
+    echo -e "${PROMPT}╚═══════════════════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    
+    local do_update=false
+    
+    # 自动安装模式直接执行
+    if [[ "${AUTO_INSTALL}" == "true" ]]; then
+        info "Auto-install mode: updating mirror list automatically"
+        do_update=true
+    else
+        # 交互式询问
+        while true; do
+            read -p "$(echo -e "${PROMPT}Update mirror list to fastest servers? [Y/n]:${RESET} ")" choice
+            # 默认选择是 (Yes)
+            choice=${choice:-y}
+            case $choice in
+                y|Y|yes|YES|"")
+                    do_update=true
+                    break
+                    ;;
+                n|N|no|NO)
+                    info "Skipping mirror list update"
+                    echo ""
+                    return 0
+                    ;;
+                *)
+                    error "Invalid option. Please enter Y or N"
+                    ;;
+            esac
+        done
+    fi
+    
+    # 执行更新
+    if [[ "${do_update}" == "true" ]]; then
+        info "Updating mirror list to fastest servers..."
+        
+        # 检查 reflector 是否安装
+        if ! command -v reflector &> /dev/null; then
+            warn "reflector not found. Installing reflector..."
+            pacman -Sy --noconfirm reflector || {
+                error "Failed to install reflector"
+                return 1
+            }
+        fi
+        
+        # 构建 reflector 命令
+        local reflector_cmd="reflector -a 12 -f 10 --sort score --save /etc/pacman.d/mirrorlist --verbose"
+        
+        # 检测时区
+        local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "")
+        
+        if [[ "${current_tz}" == "Asia/Shanghai" ]]; then
+            # 时区为 Asia/Shanghai,使用中国源
+            info "Timezone detected: ${current_tz}, using China mirrors"
+            reflector_cmd="reflector -a 12 -c cn -f 10 --sort score --save /etc/pacman.d/mirrorlist --verbose"
+        else
+            # 尝试通过 IP 获取国家代码
+            info "Detecting location via IP..."
+            local country_code=$(curl -s --max-time 2 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]')
+            
+            if [[ -n "${country_code}" && "${country_code}" =~ ^[A-Z]{2}$ ]]; then
+                info "Country detected: ${country_code}, using local mirrors"
+                reflector_cmd="reflector -a 12 -c ${country_code,,} -f 10 --sort score --save /etc/pacman.d/mirrorlist --verbose"
+            else
+                warn "Unable to detect location, using global mirrors"
+            fi
+        fi
+        
+        # 执行 reflector 命令
+        info "Running: ${reflector_cmd}"
+        eval ${reflector_cmd} || {
+            error "Failed to update mirror list"
+            return 1
+        }
+        
+        success "Mirror list updated successfully"
+        echo ""
+    fi
+}
+
 # ==============================================================================
 # 主逻辑
 # ==============================================================================
@@ -229,8 +365,13 @@ main() {
     show_banner
     check_root
     system_information
+    # 执行系统检查(开发模式会跳过失败项)
     check_system_requirements
-
+    # 询问用户安装模式
+    prompt_auto_install
+    # 更新镜像源
+    update_mirrorlist
+    
     success "Setup completed successfully!"
 }
 

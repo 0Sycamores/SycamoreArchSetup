@@ -11,11 +11,5 @@
 - 一键安装
 
 ```shell
-bash <(curl -sL arch.sycamore.icu)
-```
-
-或者如果你的系统有 wget：
-
-```shell
-bash <(wget -qO- arch.sycamore.icu)
+bash <(curl -fsSL arch.sycamore.icu)
 ```
