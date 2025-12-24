@@ -156,7 +156,7 @@ system_information() {
     fi
 
     # 打印系统信息
-    echo -e "${INFO}[SYSTEM]${RESET}     操作系统信息"
+    echo -e "${INFO}[SYSTEM]${RESET}     System Information"
     echo -e "  ${BOLD_WHITE}OS:${RESET}        ${distro}"
     echo -e "  ${BOLD_WHITE}Kernel:${RESET}    $(uname -r)"
     echo -e "  ${BOLD_WHITE}Arch:${RESET}      $(uname -m)"
@@ -169,29 +169,29 @@ system_information() {
 
 # 检查系统要求
 check_system_requirements() {
-    info "正在检查系统环境..."
+    info "Checking system requirements..."
 
     # 1. 检查是否为 Arch Linux
     if [[ ! -f /etc/arch-release ]]; then
-        error "检测到非 Arch Linux 系统。停止安装。"
+        error "Non-Arch Linux system detected. Installation stopped."
         exit 1
     fi
 
     # 2. 检查根文件系统是否为 Btrfs
     local fs_type=$(df -T / | awk 'NR==2 {print $2}')
     if [[ "$fs_type" != "btrfs" ]]; then
-        error "根文件系统不是 Btrfs (检测到: ${fs_type}), 停止安装。"
+        error "Root filesystem is not Btrfs (detected: ${fs_type}). Installation stopped."
         exit 1
     fi
 
     # 3. 检查磁盘剩余空间 (>10GB)
     local available_kb=$(df -k / | awk 'NR==2 {print $4}')
     if [[ $available_kb -lt 10485760 ]]; then
-        error "磁盘空间不足。需要至少 10GB 可用空间。"
+        error "Insufficient disk space. At least 10GB of available space is required."
         exit 1
     fi
 
-    success "系统环境检查通过。"
+    success "System checks passed."
 }
 
 # 打印信息
