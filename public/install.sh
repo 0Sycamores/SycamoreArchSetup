@@ -240,13 +240,132 @@ debug() {
     fi
 }
 
+# 打印章节标题
+# 用法: print_section_title "Section Title"
+print_section_title() {
+    local title="$1"
+    echo ""
+    echo -e "${HEADER}[SECTION]${RESET} ${BOLD_WHITE}${title}${RESET}"
+}
+
+# 执行命令并限制日志输出
+# 用法: run_command "command" ["description"]
+# 示例: run_command "pacman -Syu --noconfirm" "Updating system packages"
+run_command() {
+    local cmd="$1"
+    local description="${2:-Executing command}"
+    local max_lines=5
+    local tmp_output="/tmp/sycamore_cmd_$$.log"
+    local line_count=0
+    local buffer=()
+    
+    info "${description}..."
+    debug "Command: ${cmd}"
+    
+    # 清空临时文件
+    > "${tmp_output}"
+    
+    # 执行命令并捕获输出
+    {
+        eval "${cmd}" 2>&1 | while IFS= read -r line; do
+            # 保存到临时文件
+            echo "${line}" >> "${tmp_output}"
+            
+            # 更新缓冲区（保持最后 max_lines 行）
+            buffer+=("${line}")
+            if [[ ${#buffer[@]} -gt ${max_lines} ]]; then
+                buffer=("${buffer[@]:1}")
+            fi
+            
+            # 清除之前的输出行
+            if [[ ${line_count} -gt 0 ]]; then
+                for ((i=0; i<line_count; i++)); do
+                    echo -ne "\033[1A\033[2K"
+                done
+            fi
+            
+            # 显示缓冲区内容
+            line_count=${#buffer[@]}
+            for output_line in "${buffer[@]}"; do
+                echo -e "${DIM}  │ ${output_line}${RESET}"
+            done
+        done
+        
+        # 返回命令的退出状态
+        return ${PIPESTATUS[0]}
+    }
+    
+    local exit_code=$?
+    
+    # 清除最后显示的行
+    if [[ ${line_count} -gt 0 ]]; then
+        for ((i=0; i<line_count; i++)); do
+            echo -ne "\033[1A\033[2K"
+        done
+    fi
+    
+    if [[ ${exit_code} -eq 0 ]]; then
+        success "${description} completed"
+    else
+        error "${description} failed (exit code: ${exit_code})"
+        
+        # 显示错误日志的最后10行
+        warn "Last 10 lines of output:"
+        tail -n 10 "${tmp_output}" | while IFS= read -r line; do
+            echo -e "${DIM}  │ ${line}${RESET}"
+        done
+        
+        # 询问是否查看完整日志
+        if [[ "${AUTO_INSTALL}" != "true" ]]; then
+            echo ""
+            read -p "$(echo -e "${PROMPT}View full log? [y/N]:${RESET} ")" view_log
+            if [[ "${view_log}" =~ ^[Yy]$ ]]; then
+                less "${tmp_output}"
+            fi
+        fi
+    fi
+    
+    # 清理临时文件
+    rm -f "${tmp_output}"
+    
+    return ${exit_code}
+}
+
+# 执行命令（静默模式，不显示实时输出）
+# 用法: run_command_silent "command" ["description"]
+# 示例: run_command_silent "pacman -Q firefox" "Checking if firefox is installed"
+run_command_silent() {
+    local cmd="$1"
+    local description="${2:-Executing command}"
+    local tmp_output="/tmp/sycamore_cmd_silent_$$.log"
+    
+    debug "Running silently: ${cmd}"
+    
+    # 执行命令并捕获输出
+    eval "${cmd}" > "${tmp_output}" 2>&1
+    local exit_code=$?
+    
+    if [[ ${exit_code} -eq 0 ]]; then
+        debug "${description} completed (silent)"
+    else
+        error "${description} failed (exit code: ${exit_code})"
+        
+        # 显示错误日志的最后5行
+        warn "Last 5 lines of output:"
+        tail -n 5 "${tmp_output}" | while IFS= read -r line; do
+            echo -e "${DIM}  │ ${line}${RESET}"
+        done
+    fi
+    
+    # 清理临时文件
+    rm -f "${tmp_output}"
+    
+    return ${exit_code}
+}
+
 # 询问用户是否全自动安装
 prompt_auto_install() {
-    echo ""
-    echo -e "${PROMPT}╔═══════════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${PROMPT}║  ${BOLD_WHITE}Installation Mode Selection${RESET}${PROMPT}                                      ║${RESET}"
-    echo -e "${PROMPT}╚═══════════════════════════════════════════════════════════════════╝${RESET}"
-    echo ""
+    print_section_title "Installation Mode Selection"
     
     while true; do
         read -p "$(echo -e "${PROMPT}Enable automatic installation? [y/N]:${RESET} ")" choice
@@ -274,11 +393,7 @@ prompt_auto_install() {
 
 # 更新镜像源为最快的源
 update_mirrorlist() {
-    echo ""
-    echo -e "${PROMPT}╔═══════════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${PROMPT}║  ${BOLD_WHITE}Mirror List Optimization${RESET}${PROMPT}                                         ║${RESET}"
-    echo -e "${PROMPT}╚═══════════════════════════════════════════════════════════════════╝${RESET}"
-    echo ""
+    print_section_title "Mirror List Optimization"
     
     local do_update=false
     
@@ -316,7 +431,7 @@ update_mirrorlist() {
         # 检查 reflector 是否安装
         if ! command -v reflector &> /dev/null; then
             warn "reflector not found. Installing reflector..."
-            pacman -Sy --noconfirm reflector || {
+            run_command "pacman -Sy --noconfirm reflector" "Installing reflector" || {
                 error "Failed to install reflector"
                 return 1
             }
@@ -346,13 +461,10 @@ update_mirrorlist() {
         fi
         
         # 执行 reflector 命令
-        info "Running: ${reflector_cmd}"
-        eval ${reflector_cmd} || {
+        run_command "${reflector_cmd}" "Updating mirror list" || {
             error "Failed to update mirror list"
             return 1
         }
-        
-        success "Mirror list updated successfully"
         echo ""
     fi
 }
