@@ -17,6 +17,10 @@ AUTO_INSTALL=false
 # 开发模式通过环境变量 DEV_MODE=1 启用
 DEV_MODE="${DEV_MODE:-0}"
 
+# 进度记录相关
+PROGRESS_DIR="/tmp/sycamore-setup"
+PROGRESS_FILE="${PROGRESS_DIR}/progress"
+
 
 # ==============================================================================
 # TUI 颜色与样式定义
@@ -77,8 +81,8 @@ if [[ "${COLOR_SUPPORT}" == "true" ]]; then
     WARNING="${BOLD_YELLOW}"
     ERROR="${BOLD_RED}"
     DEBUG="${DIM}"
-    HEADER="${BOLD_RED}"
-    PROMPT="${BOLD_RED}"
+    HEADER="${BOLD_MAGENTA}"
+    PROMPT="${BOLD_CYAN}"
 else
     # 如果不支持颜色，禁用所有颜色代码
     RESET='' BLACK='' RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN='' WHITE=''
@@ -87,6 +91,34 @@ else
     BOLD='' DIM='' UNDERLINE='' BLINK='' REVERSE='' HIDDEN=''
     INFO='' SUCCESS='' WARNING='' ERROR='' DEBUG='' HEADER='' PROMPT=''
 fi
+
+
+# 打印信息
+info() {
+    echo -e "${INFO}[   INFO]${RESET} $*"
+}
+
+# 打印成功消息
+success() {
+    echo -e "${SUCCESS}[SUCCESS]${RESET} $*"
+}
+
+# 打印警告
+warn() {
+    echo -e "${WARNING}[WARNING]${RESET} $*"
+}
+
+# 打印错误
+error() {
+    echo -e "${ERROR}[  ERROR]${RESET} $*" >&2
+}
+
+# 打印调试信息
+debug() {
+    if [[ "${DEBUG_MODE:-0}" == "1" ]]; then
+        echo -e "${DEBUG}[  DEBUG]${RESET} $*"
+    fi
+}
 
 # 打印Banner
 show_banner() {
@@ -111,10 +143,15 @@ EOF
 
 # 检查 Root 权限
 check_root() {
+    print_section_title "Privilege Check"
+    
     if [[ $EUID -ne 0 ]]; then
-        error "此脚本需要 Root 权限。 请使用 ${BOLD_WHITE}sudo${RESET} 运行或切换到 ${BOLD_WHITE}root${RESET} 用户。"
+        error "This script requires root privileges. Please run with ${BOLD_WHITE}sudo${RESET} or switch to ${BOLD_WHITE}root${RESET} user."
         exit 1
     fi
+    
+    success "Running as root"
+    echo ""
 }
 
 # 打印系统信息
@@ -157,27 +194,35 @@ system_information() {
         disk_total=$(df -h / | awk 'NR==2 {print $2}')
         fs_type=$(df -T / | awk 'NR==2 {print $2}')
     fi
+   
+    # 获取主机名
+    local hostname_val=""
+    if [[ -f /etc/hostname ]]; then
+        hostname_val=$(cat /etc/hostname 2>/dev/null | tr -d '[:space:]')
+    elif command -v hostnamectl &> /dev/null; then
+        hostname_val=$(hostnamectl --static 2>/dev/null)
+    fi
 
     # 打印系统信息
-    echo -e "${INFO}[SYSTEM]${RESET}     System Information"
+    echo -e "${INFO}[ SYSTEM]${RESET} System Information"
     echo -e "  ${BOLD_WHITE}OS:${RESET}        ${distro}"
     echo -e "  ${BOLD_WHITE}Kernel:${RESET}    $(uname -r)"
     echo -e "  ${BOLD_WHITE}Arch:${RESET}      $(uname -m)"
     echo -e "  ${BOLD_WHITE}CPU:${RESET}       ${cpu_info}"
     echo -e "  ${BOLD_WHITE}Memory:${RESET}    ${mem_used} / ${mem_total}  Swap: ${swap_used} / ${swap_total}"
     echo -e "  ${BOLD_WHITE}Disk:${RESET}      ${disk_used} / ${disk_total} (${fs_type})"
-    echo -e "  ${BOLD_WHITE}User:${RESET}      $(whoami)@$(hostname 2>/dev/null || echo "")"
+    echo -e "  ${BOLD_WHITE}User:${RESET}      $(whoami)@${hostname_val:-unknown}"
     echo ""
 }
 
 # 检查系统要求
 check_system_requirements() {
+    print_section_title "Check System Requirements"
+
     if [[ "${DEV_MODE}" == "1" ]]; then
         warn "Running in DEV MODE - system checks will be skipped on failure"
     fi
     
-    info "Checking system requirements..."
-
     # 1. 检查是否为 Arch Linux
     if [[ ! -f /etc/arch-release ]]; then
         if [[ "${DEV_MODE}" == "1" ]]; then
@@ -211,40 +256,14 @@ check_system_requirements() {
     fi
 
     success "System checks passed."
+    echo ""
 }
 
-# 打印信息
-info() {
-    echo -e "${INFO}[INFO]   ${RESET} $*"
-}
-
-# 打印成功消息
-success() {
-    echo -e "${SUCCESS}[SUCCESS]${RESET} $*"
-}
-
-# 打印警告
-warn() {
-    echo -e "${WARNING}[WARNING]${RESET} $*"
-}
-
-# 打印错误
-error() {
-    echo -e "${ERROR}[ERROR]${RESET} $*" >&2
-}
-
-# 打印调试信息
-debug() {
-    if [[ "${DEBUG_MODE:-0}" == "1" ]]; then
-        echo -e "${DEBUG}[DEBUG]${RESET} $*"
-    fi
-}
 
 # 打印章节标题
 # 用法: print_section_title "Section Title"
 print_section_title() {
     local title="$1"
-    echo ""
     echo -e "${HEADER}[SECTION]${RESET} ${BOLD_WHITE}${title}${RESET}"
 }
 
@@ -329,56 +348,24 @@ run_command() {
     rm -f "${tmp_output}"
     
     return ${exit_code}
-}
-
-# 执行命令（静默模式，不显示实时输出）
-# 用法: run_command_silent "command" ["description"]
-# 示例: run_command_silent "pacman -Q firefox" "Checking if firefox is installed"
-run_command_silent() {
-    local cmd="$1"
-    local description="${2:-Executing command}"
-    local tmp_output="/tmp/sycamore_cmd_silent_$$.log"
-    
-    debug "Running silently: ${cmd}"
-    
-    # 执行命令并捕获输出
-    eval "${cmd}" > "${tmp_output}" 2>&1
-    local exit_code=$?
-    
-    if [[ ${exit_code} -eq 0 ]]; then
-        debug "${description} completed (silent)"
-    else
-        error "${description} failed (exit code: ${exit_code})"
-        
-        # 显示错误日志的最后5行
-        warn "Last 5 lines of output:"
-        tail -n 5 "${tmp_output}" | while IFS= read -r line; do
-            echo -e "${DIM}  │ ${line}${RESET}"
-        done
-    fi
-    
-    # 清理临时文件
-    rm -f "${tmp_output}"
-    
-    return ${exit_code}
-}
+} 
 
 # 询问用户是否全自动安装
 prompt_auto_install() {
     print_section_title "Installation Mode Selection"
     
     while true; do
-        read -p "$(echo -e "${PROMPT}Enable automatic installation? [y/N]:${RESET} ")" choice
-        # 默认选择交互式安装 (No)
-        choice=${choice:-n}
+        read -p "$(echo -e "${PROMPT}Enable automatic installation? [Y/n]:${RESET} ")" choice
+        # 默认选择自动安装 (Yes)
+        choice=${choice:-y}
         case $choice in
-            y|Y|yes|YES)
+            y|Y|yes|YES|"")
                 AUTO_INSTALL=true
                 success "Automatic installation mode selected"
                 echo ""
                 break
                 ;;
-            n|N|no|NO|"")
+            n|N|no|NO)
                 AUTO_INSTALL=false
                 success "Interactive installation mode selected"
                 echo ""
@@ -467,7 +454,196 @@ update_mirrorlist() {
             error "Failed to update mirror list"
             return 1
         }
+        
+        success "Mirror list optimization completed"
         echo ""
+    fi
+}
+
+# 更新系统
+update_system() {
+    print_section_title "System Update"
+    
+    local do_update=false
+    
+    # 自动安装模式直接执行
+    if [[ "${AUTO_INSTALL}" == "true" ]]; then
+        info "Auto-install mode: updating system automatically"
+        do_update=true
+    else
+        # 交互式询问
+        while true; do
+            read -p "$(echo -e "${PROMPT}Update system packages? [Y/n]:${RESET} ")" choice
+            # 默认选择是 (Yes)
+            choice=${choice:-y}
+            case $choice in
+                y|Y|yes|YES|"")
+                    do_update=true
+                    break
+                    ;;
+                n|N|no|NO)
+                    info "Skipping system update"
+                    echo ""
+                    return 0
+                    ;;
+                *)
+                    error "Invalid option. Please enter Y or N"
+                    ;;
+            esac
+        done
+    fi
+    
+    # 执行更新
+    if [[ "${do_update}" == "true" ]]; then
+        run_command "pacman -Syu --noconfirm" "Updating system packages" || {
+            error "Failed to update system"
+            return 1
+        }
+        
+        success "System update completed"
+        echo ""
+    fi
+}
+
+# ==============================================================================
+# 进度记录系统
+# ==============================================================================
+
+# 初始化进度记录系统
+init_progress() {
+    # 创建进度目录
+    if [[ ! -d "${PROGRESS_DIR}" ]]; then
+        mkdir -p "${PROGRESS_DIR}"
+    fi
+    
+    # 创建进度文件
+    if [[ ! -f "${PROGRESS_FILE}" ]]; then
+        touch "${PROGRESS_FILE}"
+    fi
+}
+
+# 清理进度文件
+cleanup_progress() {
+    if [[ -d "${PROGRESS_DIR}" ]]; then
+        rm -rf "${PROGRESS_DIR}"
+        debug "Progress directory cleaned up"
+    fi
+}
+
+# 检查步骤是否已完成
+is_step_completed() {
+    local step_name="$1"
+    grep -qx "${step_name}" "${PROGRESS_FILE}" 2>/dev/null
+}
+
+# 标记步骤为已完成
+mark_step_completed() {
+    local step_name="$1"
+    
+    # 避免重复记录
+    if ! is_step_completed "${step_name}"; then
+        echo "${step_name}" >> "${PROGRESS_FILE}"
+        debug "Marked step '${step_name}' as completed"
+    fi
+}
+
+# 重置进度
+reset_progress() {
+    if [[ -f "${PROGRESS_FILE}" ]]; then
+        > "${PROGRESS_FILE}"
+        success "Progress has been reset"
+    fi
+}
+
+# 获取已完成的步骤数量
+get_completed_steps_count() {
+    if [[ -f "${PROGRESS_FILE}" ]]; then
+        wc -l < "${PROGRESS_FILE}" 2>/dev/null | tr -d ' '
+    else
+        echo "0"
+    fi
+}
+
+# 显示已完成的步骤
+show_completed_steps() {
+    if [[ -f "${PROGRESS_FILE}" ]] && [[ -s "${PROGRESS_FILE}" ]]; then
+        info "Completed steps from previous run:"
+        while IFS= read -r step; do
+            echo -e "  ${SUCCESS}✓${RESET} ${step}"
+        done < "${PROGRESS_FILE}"
+    fi
+}
+
+# 检查是否有未完成的安装进度，并询问用户是否继续
+check_previous_progress() {
+    init_progress
+    
+    local completed_count=$(get_completed_steps_count)
+    
+    if [[ ${completed_count} -gt 0 ]]; then
+        print_section_title "Previous Installation Detected"
+        
+        info "Found ${completed_count} completed step(s) from previous installation"
+        show_completed_steps
+        echo ""
+        
+        if [[ "${AUTO_INSTALL}" == "true" ]]; then
+            info "Auto-install mode: continuing from previous progress"
+            return 0
+        fi
+        
+        while true; do
+            echo -e "${PROMPT}How would you like to proceed?${RESET}"
+            echo -e "  ${BOLD_WHITE}[C]${RESET} Continue from where you left off"
+            echo -e "  ${BOLD_WHITE}[R]${RESET} Reset and start fresh"
+            echo -e "  ${BOLD_WHITE}[Q]${RESET} Quit"
+            read -p "$(echo -e "${PROMPT}Your choice [C/r/q]:${RESET} ")" choice
+            
+            choice=${choice:-c}
+            case ${choice} in
+                c|C|continue|"")
+                    info "Continuing from previous progress..."
+                    echo ""
+                    return 0
+                    ;;
+                r|R|reset)
+                    reset_progress
+                    echo ""
+                    return 0
+                    ;;
+                q|Q|quit)
+                    info "Installation cancelled by user"
+                    exit 0
+                    ;;
+                *)
+                    error "Invalid option. Please enter C, R, or Q"
+                    ;;
+            esac
+        done
+    fi
+}
+
+# 运行带进度记录的步骤
+# 用法: run_step "step_name" "function_name" ["description"]
+# 返回值: 0 表示成功（包括跳过），1 表示失败
+run_step() {
+    local step_name="$1"
+    local step_func="$2"
+    local description="${3:-${step_name}}"
+    
+    # 检查是否已完成
+    if is_step_completed "${step_name}"; then
+        info "Skipping '${description}' ${DIM}(already completed)${RESET}"
+        return 0
+    fi
+    
+    # 执行步骤函数
+    if "${step_func}"; then
+        mark_step_completed "${step_name}"
+        return 0
+    else
+        error "Step '${description}' failed"
+        return 1
     fi
 }
 
@@ -477,16 +653,18 @@ update_mirrorlist() {
 
 main() {
     show_banner
-    check_root
     system_information
-    # 执行系统检查(开发模式会跳过失败项)
+    check_root
     check_system_requirements
-    # 询问用户安装模式
     prompt_auto_install
-    # 更新镜像源
     update_mirrorlist
-    
-    success "Setup completed successfully!"
+    update_system
+
+    # 初始化安装进度
+    init_progress
+        
+    # 安装完成后自动清理进度文件
+    cleanup_progress
 }
 
 # 捕获 Ctrl+C
