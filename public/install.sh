@@ -331,87 +331,6 @@ run_command() {
     return ${exit_code}
 }
 
-# 执行 reflector 命令（专用方法，处理特殊输出）
-# 用法: run_reflector "reflector_args"
-# 示例: run_reflector "-a 12 -c cn -f 10 --sort score --save /etc/pacman.d/mirrorlist"
-run_reflector() {
-    local reflector_args="$1"
-    local description="Updating mirror list"
-    local tmp_output="/tmp/sycamore_reflector_$$.log"
-    local max_lines=5
-    
-    info "${description}..."
-    debug "Command: reflector ${reflector_args}"
-    
-    # 清空临时文件
-    > "${tmp_output}"
-    
-    # 使用 script 命令或直接捕获，避免 reflector 的特殊输出问题
-    # reflector 使用 --verbose 时会输出到 stderr，我们需要合并输出
-    # 使用 stdbuf 来禁用缓冲，确保实时输出
-    {
-        # 后台运行 reflector 并捕获输出到临时文件
-        stdbuf -oL -eL reflector ${reflector_args} > "${tmp_output}" 2>&1 &
-        local reflector_pid=$!
-        
-        local displayed_lines=0
-        
-        # 循环读取输出并显示最后 max_lines 行
-        while kill -0 "${reflector_pid}" 2>/dev/null; do
-            local current_lines=$(wc -l < "${tmp_output}" 2>/dev/null || echo 0)
-            
-            if [[ ${current_lines} -gt 0 ]]; then
-                # 清除之前显示的行
-                if [[ ${displayed_lines} -gt 0 ]]; then
-                    for ((i=0; i<displayed_lines; i++)); do
-                        echo -ne "\033[1A\033[2K"
-                    done
-                fi
-                
-                # 显示最后 max_lines 行
-                displayed_lines=$(( current_lines < max_lines ? current_lines : max_lines ))
-                tail -n ${max_lines} "${tmp_output}" | while IFS= read -r line; do
-                    echo -e "${DIM}  │ ${line}${RESET}"
-                done
-            fi
-            
-            sleep 0.3
-        done
-        
-        # 等待 reflector 完成并获取退出码
-        wait "${reflector_pid}"
-        local exit_code=$?
-        
-        # 最后再读取一次，确保显示最终状态
-        local final_lines=$(wc -l < "${tmp_output}" 2>/dev/null || echo 0)
-        if [[ ${final_lines} -gt 0 ]]; then
-            # 清除之前显示的行
-            if [[ ${displayed_lines} -gt 0 ]]; then
-                for ((i=0; i<displayed_lines; i++)); do
-                    echo -ne "\033[1A\033[2K"
-                done
-            fi
-        fi
-        
-        if [[ ${exit_code} -eq 0 ]]; then
-            success "${description} completed"
-        else
-            error "${description} failed (exit code: ${exit_code})"
-            
-            # 显示错误日志的最后10行
-            warn "Last 10 lines of output:"
-            tail -n 10 "${tmp_output}" | while IFS= read -r line; do
-                echo -e "${DIM}  │ ${line}${RESET}"
-            done
-        fi
-        
-        # 清理临时文件
-        rm -f "${tmp_output}"
-        
-        return ${exit_code}
-    }
-}
-
 # 执行命令（静默模式，不显示实时输出）
 # 用法: run_command_silent "command" ["description"]
 # 示例: run_command_silent "pacman -Q firefox" "Checking if firefox is installed"
@@ -518,33 +437,33 @@ update_mirrorlist() {
             }
         fi
         
-        # 构建 reflector 命令
-        local reflector_cmd="reflector -a 12 -f 10 --sort score --save /etc/pacman.d/mirrorlist --verbose"
-        
-        # 检测时区
+        # 检测国家代码
+        local country_code=""
         local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "")
         
         if [[ "${current_tz}" == "Asia/Shanghai" ]]; then
-            # 时区为 Asia/Shanghai,使用中国源
+            # 时区为 Asia/Shanghai，使用中国源
             info "Timezone detected: ${current_tz}, using China mirrors"
-            reflector_cmd="reflector -a 12 -c cn -f 10 --sort score --save /etc/pacman.d/mirrorlist --verbose"
+            country_code="cn"
         else
             # 尝试通过 IP 获取国家代码
             info "Detecting location via IP..."
-            local country_code=$(curl -s --max-time 2 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]')
+            local detected_code=$(curl -s --max-time 2 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]')
             
-            if [[ -n "${country_code}" && "${country_code}" =~ ^[A-Z]{2}$ ]]; then
-                info "Country detected: ${country_code}, using local mirrors"
-                reflector_cmd="reflector -a 12 -c ${country_code,,} -f 10 --sort score --save /etc/pacman.d/mirrorlist --verbose"
+            if [[ -n "${detected_code}" && "${detected_code}" =~ ^[A-Z]{2}$ ]]; then
+                info "Country detected: ${detected_code}, using local mirrors"
+                country_code="${detected_code,,}"
             else
                 warn "Unable to detect location, using global mirrors"
             fi
         fi
         
-        # 执行 reflector 命令（使用专用方法）
-        # 去掉 "reflector " 前缀，只传递参数
-        local reflector_args="${reflector_cmd#reflector }"
-        run_reflector "${reflector_args}" || {
+        # 构建 reflector 命令（使用 http/https 协议避免 rsync 警告）
+        local reflector_cmd="reflector -a 12 -f 10 --protocol http,https --sort score --save /etc/pacman.d/mirrorlist --verbose"
+        [[ -n "${country_code}" ]] && reflector_cmd+=" -c ${country_code}"
+        
+        # 执行 reflector 命令
+        run_command "${reflector_cmd}" "Updating mirror list" || {
             error "Failed to update mirror list"
             return 1
         }
@@ -576,4 +495,4 @@ trap 'echo -e "\n${RED}[!] Script interrupted by user.${RESET}"; exit 1' SIGINT
 # 执行主函数
 main "$@"
 
-## ## ## ## ##
+## ## ## ##
