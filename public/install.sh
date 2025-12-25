@@ -256,50 +256,59 @@ run_command() {
     local description="${2:-Executing command}"
     local max_lines=5
     local tmp_output="/tmp/sycamore_cmd_$$.log"
-    local line_count=0
-    local buffer=()
+    local tmp_display="/tmp/sycamore_display_$$.log"
+    local displayed_lines=0
     
     info "${description}..."
     debug "Command: ${cmd}"
     
     # 清空临时文件
     > "${tmp_output}"
+    > "${tmp_display}"
     
-    # 执行命令并捕获输出
-    {
-        eval "${cmd}" 2>&1 | while IFS= read -r line; do
-            # 保存到临时文件
-            echo "${line}" >> "${tmp_output}"
-            
-            # 更新缓冲区（保持最后 max_lines 行）
-            buffer+=("${line}")
-            if [[ ${#buffer[@]} -gt ${max_lines} ]]; then
-                buffer=("${buffer[@]:1}")
-            fi
-            
-            # 清除之前的输出行
-            if [[ ${line_count} -gt 0 ]]; then
-                for ((i=0; i<line_count; i++)); do
-                    echo -ne "\033[1A\033[2K"
-                done
-            fi
-            
-            # 显示缓冲区内容
-            line_count=${#buffer[@]}
-            for output_line in "${buffer[@]}"; do
-                echo -e "${DIM}  │ ${output_line}${RESET}"
-            done
-        done
+    # 执行命令并捕获输出，使用 stdbuf 禁用缓冲以确保实时输出
+    # 同时处理 \r（回车符）以正确处理进度条类输出
+    eval "${cmd}" 2>&1 | while IFS= read -r line || [[ -n "${line}" ]]; do
+        # 移除回车符，只保留最后一段（处理进度条）
+        line=$(echo "${line}" | tr '\r' '\n' | tail -n 1)
         
-        # 返回命令的退出状态
-        return ${PIPESTATUS[0]}
-    }
+        # 跳过空行
+        [[ -z "${line}" ]] && continue
+        
+        # 保存到临时文件
+        echo "${line}" >> "${tmp_output}"
+        
+        # 清除之前显示的行
+        if [[ ${displayed_lines} -gt 0 ]]; then
+            for ((i=0; i<displayed_lines; i++)); do
+                echo -ne "\033[1A\033[2K"
+            done
+        fi
+        
+        # 更新显示缓冲区（保持最后 max_lines 行）
+        echo "${line}" >> "${tmp_display}"
+        
+        # 显示最后 max_lines 行
+        displayed_lines=$(wc -l < "${tmp_display}")
+        if [[ ${displayed_lines} -gt ${max_lines} ]]; then
+            displayed_lines=${max_lines}
+        fi
+        
+        tail -n ${max_lines} "${tmp_display}" | while IFS= read -r output_line; do
+            echo -e "${DIM}  │ ${output_line}${RESET}"
+        done
+    done
     
-    local exit_code=$?
+    # 获取命令退出状态
+    local exit_code=${PIPESTATUS[0]}
     
     # 清除最后显示的行
-    if [[ ${line_count} -gt 0 ]]; then
-        for ((i=0; i<line_count; i++)); do
+    local final_lines=$(wc -l < "${tmp_display}" 2>/dev/null || echo "0")
+    if [[ ${final_lines} -gt ${max_lines} ]]; then
+        final_lines=${max_lines}
+    fi
+    if [[ ${final_lines} -gt 0 ]]; then
+        for ((i=0; i<final_lines; i++)); do
             echo -ne "\033[1A\033[2K"
         done
     fi
@@ -326,7 +335,7 @@ run_command() {
     fi
     
     # 清理临时文件
-    rm -f "${tmp_output}"
+    rm -f "${tmp_output}" "${tmp_display}"
     
     return ${exit_code}
 }
