@@ -17,10 +17,6 @@ AUTO_INSTALL=false
 # 开发模式通过环境变量 DEV_MODE=1 启用
 DEV_MODE="${DEV_MODE:-0}"
 
-# 进度记录相关
-PROGRESS_DIR="/tmp/sycamore-setup"
-PROGRESS_FILE="${PROGRESS_DIR}/progress"
-
 
 # ==============================================================================
 # TUI 颜色与样式定义
@@ -141,19 +137,6 @@ EOF
     echo ""
 }
 
-# 检查 Root 权限
-check_root() {
-    print_section_title "Privilege Check"
-    
-    if [[ $EUID -ne 0 ]]; then
-        error "This script requires root privileges. Please run with ${BOLD_WHITE}sudo${RESET} or switch to ${BOLD_WHITE}root${RESET} user."
-        exit 1
-    fi
-    
-    success "Running as root"
-    echo ""
-}
-
 # 打印系统信息
 system_information() {
     local distro="Unknown"
@@ -220,42 +203,72 @@ check_system_requirements() {
     print_section_title "Check System Requirements"
 
     if [[ "${DEV_MODE}" == "1" ]]; then
-        warn "Running in DEV MODE - system checks will be skipped on failure"
+        warn "Running in DEV MODE - some system checks may be skipped on failure"
     fi
     
-    # 1. 检查是否为 Arch Linux
+    # 1. 检查 Root 权限
+    info "Checking root privileges..."
+    if [[ $EUID -ne 0 ]]; then
+        error "This script requires root privileges. Please run with ${BOLD_WHITE}sudo${RESET} or switch to ${BOLD_WHITE}root${RESET} user."
+        exit 1
+    fi
+    success "Running as root"
+    
+    # 2. 检查是否为 Arch Linux
+    info "Checking Linux distribution..."
     if [[ ! -f /etc/arch-release ]]; then
-        if [[ "${DEV_MODE}" == "1" ]]; then
-            warn "Non-Arch Linux system detected. ${DIM}(Skipped in dev mode)${RESET}"
-        else
-            error "Non-Arch Linux system detected. Installation stopped."
-            exit 1
-        fi
+        error "Non-Arch Linux system detected. Installation stopped."
+        exit 1
+    else
+        success "Arch Linux detected"
     fi
 
-    # 2. 检查根文件系统是否为 Btrfs
-    local fs_type=$(df -T / | awk 'NR==2 {print $2}')
-    if [[ "$fs_type" != "btrfs" ]]; then
-        if [[ "${DEV_MODE}" == "1" ]]; then
-            warn "Root filesystem is not Btrfs (detected: ${fs_type}). ${DIM}(Skipped in dev mode)${RESET}"
-        else
-            error "Root filesystem is not Btrfs (detected: ${fs_type}). Installation stopped."
-            exit 1
-        fi
+    # 3. 检查 Root 文件系统是否为 Btrfs
+    info "Checking Root filesystem..."
+    local root_fstype=$(findmnt -n -o FSTYPE /)
+    
+    if [[ "${root_fstype}" != "btrfs" ]]; then
+        error "Root is not Btrfs (detected: ${root_fstype})."
+        error "This installation requires Btrfs filesystem for snapshot protection."
+        exit 1
+    else
+        success "Root is Btrfs"
     fi
 
-    # 3. 检查磁盘剩余空间 (>10GB)
+    # 4. 检查 /home 文件系统（如果是独立挂载点）
+    info "Checking Home filesystem..."
+    if findmnt /home &> /dev/null; then
+        local home_fstype=$(findmnt -n -o FSTYPE /home 2>/dev/null)
+        
+        if [[ "${home_fstype}" != "btrfs" ]]; then
+            error "Home is not Btrfs (detected: ${home_fstype})."
+            error "All filesystems must be Btrfs for snapshot protection."
+            exit 1
+        else
+            success "Home is Btrfs"
+        fi
+    else
+        info "/home is not a separate mount point (using root filesystem)"
+    fi
+
+    # 5. 检查磁盘剩余空间 (>10GB)
+    info "Checking available disk space..."
     local available_kb=$(df -k / | awk 'NR==2 {print $4}')
+    local available_gb=$((available_kb / 1024 / 1024))
+    
     if [[ $available_kb -lt 10485760 ]]; then
         if [[ "${DEV_MODE}" == "1" ]]; then
-            warn "Insufficient disk space. ${DIM}(Skipped in dev mode)${RESET}"
+            warn "Insufficient disk space (${available_gb}GB available). ${DIM}(Skipped in dev mode)${RESET}"
         else
             error "Insufficient disk space. At least 10GB of available space is required."
+            error "Current available space: ${available_gb}GB"
             exit 1
         fi
+    else
+        success "Sufficient disk space available (${available_gb}GB)"
     fi
-
-    success "System checks passed."
+    
+    success "All system checks passed."
     echo ""
 }
 
@@ -458,10 +471,11 @@ update_mirrorlist() {
         success "Mirror list optimization completed"
         echo ""
     fi
+    
 }
 
 # 更新系统
-update_system() {
+update_system() {   
     print_section_title "System Update"
     
     local do_update=false
@@ -506,146 +520,540 @@ update_system() {
 }
 
 # ==============================================================================
-# 进度记录系统
+# Btrfs 快照管理系统 (Snapper)
 # ==============================================================================
 
-# 初始化进度记录系统
-init_progress() {
-    # 创建进度目录
-    if [[ ! -d "${PROGRESS_DIR}" ]]; then
-        mkdir -p "${PROGRESS_DIR}"
-    fi
+# 初始化 Btrfs 快照系统并创建初始安全快照
+init_btrfs_snapshots() {
+    print_section_title "System Snapshot Initialization"
     
-    # 创建进度文件
-    if [[ ! -f "${PROGRESS_FILE}" ]]; then
-        touch "${PROGRESS_FILE}"
-    fi
-}
-
-# 清理进度文件
-cleanup_progress() {
-    if [[ -d "${PROGRESS_DIR}" ]]; then
-        rm -rf "${PROGRESS_DIR}"
-        debug "Progress directory cleaned up"
-    fi
-}
-
-# 检查步骤是否已完成
-is_step_completed() {
-    local step_name="$1"
-    grep -qx "${step_name}" "${PROGRESS_FILE}" 2>/dev/null
-}
-
-# 标记步骤为已完成
-mark_step_completed() {
-    local step_name="$1"
+    # 安装 Snapper 和 snap-pac
+    info "Installing Snapper and snap-pac..."
+    run_command "pacman -Syu --noconfirm --needed snapper snap-pac" "Installing snapshot tools" || {
+        error "Failed to install Snapper"
+        return 1
+    }
     
-    # 避免重复记录
-    if ! is_step_completed "${step_name}"; then
-        echo "${step_name}" >> "${PROGRESS_FILE}"
-        debug "Marked step '${step_name}' as completed"
-    fi
-}
-
-# 重置进度
-reset_progress() {
-    if [[ -f "${PROGRESS_FILE}" ]]; then
-        > "${PROGRESS_FILE}"
-        success "Progress has been reset"
-    fi
-}
-
-# 获取已完成的步骤数量
-get_completed_steps_count() {
-    if [[ -f "${PROGRESS_FILE}" ]]; then
-        wc -l < "${PROGRESS_FILE}" 2>/dev/null | tr -d ' '
+    # 配置 Root 快照
+    info "Configuring Snapper for Root..."
+    
+    # 检查配置是否已存在
+    if snapper list-configs 2>/dev/null | grep -q "^root "; then
+        info "Config 'root' already exists"
     else
-        echo "0"
-    fi
-}
-
-# 显示已完成的步骤
-show_completed_steps() {
-    if [[ -f "${PROGRESS_FILE}" ]] && [[ -s "${PROGRESS_FILE}" ]]; then
-        info "Completed steps from previous run:"
-        while IFS= read -r step; do
-            echo -e "  ${SUCCESS}✓${RESET} ${step}"
-        done < "${PROGRESS_FILE}"
-    fi
-}
-
-# 检查是否有未完成的安装进度，并询问用户是否继续
-check_previous_progress() {
-    init_progress
-    
-    local completed_count=$(get_completed_steps_count)
-    
-    if [[ ${completed_count} -gt 0 ]]; then
-        print_section_title "Previous Installation Detected"
-        
-        info "Found ${completed_count} completed step(s) from previous installation"
-        show_completed_steps
-        echo ""
-        
-        if [[ "${AUTO_INSTALL}" == "true" ]]; then
-            info "Auto-install mode: continuing from previous progress"
-            return 0
+        # 清理现有的 .snapshots 目录
+        if [[ -d "/.snapshots" ]]; then
+            info "Cleaning up existing .snapshots directory..."
+            umount /.snapshots 2>/dev/null || true
+            rm -rf /.snapshots
         fi
         
-        while true; do
-            echo -e "${PROMPT}How would you like to proceed?${RESET}"
-            echo -e "  ${BOLD_WHITE}[C]${RESET} Continue from where you left off"
-            echo -e "  ${BOLD_WHITE}[R]${RESET} Reset and start fresh"
-            echo -e "  ${BOLD_WHITE}[Q]${RESET} Quit"
-            read -p "$(echo -e "${PROMPT}Your choice [C/r/q]:${RESET} ")" choice
+        # 创建配置
+        if run_command "snapper -c root create-config /" "Creating Snapper configuration"; then
+            success "Config 'root' created"
             
-            choice=${choice:-c}
-            case ${choice} in
-                c|C|continue|"")
-                    info "Continuing from previous progress..."
-                    echo ""
-                    return 0
-                    ;;
-                r|R|reset)
-                    reset_progress
-                    echo ""
-                    return 0
-                    ;;
-                q|Q|quit)
-                    info "Installation cancelled by user"
-                    exit 0
-                    ;;
-                *)
-                    error "Invalid option. Please enter C, R, or Q"
-                    ;;
-            esac
+            # 应用保留策略
+            info "Applying retention policy..."
+            # ALLOW_GROUPS="wheel"           - 允许 wheel 组用户访问快照
+            # TIMELINE_CREATE="yes"          - 启用时间线快照（自动定期创建）
+            # TIMELINE_CLEANUP="yes"         - 启用时间线清理（自动删除旧快照）
+            # NUMBER_LIMIT="10"              - 最多保留 10 个普通快照
+            # NUMBER_LIMIT_IMPORTANT="5"     - 最多保留 5 个重要快照
+            # TIMELINE_LIMIT_HOURLY="5"      - 每小时快照保留 5 个
+            # TIMELINE_LIMIT_DAILY="7"       - 每日快照保留 7 个
+            # TIMELINE_LIMIT_WEEKLY="0"      - 每周快照保留 0 个（不保留）
+            # TIMELINE_LIMIT_MONTHLY="0"     - 每月快照保留 0 个（不保留）
+            # TIMELINE_LIMIT_YEARLY="0"      - 每年快照保留 0 个（不保留）
+            snapper -c root set-config \
+                ALLOW_GROUPS="wheel" \
+                TIMELINE_CREATE="yes" \
+                TIMELINE_CLEANUP="yes" \
+                NUMBER_LIMIT="10" \
+                NUMBER_LIMIT_IMPORTANT="5" \
+                TIMELINE_LIMIT_HOURLY="5" \
+                TIMELINE_LIMIT_DAILY="7" \
+                TIMELINE_LIMIT_WEEKLY="0" \
+                TIMELINE_LIMIT_MONTHLY="0" \
+                TIMELINE_LIMIT_YEARLY="0"
+            
+            success "Retention policy applied"
+        else
+            error "Failed to create Snapper configuration"
+            return 1
+        fi
+    fi
+    
+    # 配置 /home 快照（如果是独立的 Btrfs 挂载点）
+    if findmnt /home &> /dev/null; then
+        info "Configuring Snapper for Home..."
+        
+        if ! snapper list-configs 2>/dev/null | grep -q "^home "; then
+            # 清理 /home/.snapshots
+            if [[ -d "/home/.snapshots" ]]; then
+                umount /home/.snapshots 2>/dev/null || true
+                rm -rf /home/.snapshots
+            fi
+            
+            if run_command "snapper -c home create-config /home" "Creating Home configuration"; then
+                success "Config 'home' created"
+                
+                # 应用与 root 相同的保留策略
+                # ALLOW_GROUPS="wheel"           - 允许 wheel 组用户访问快照
+                # TIMELINE_CREATE="yes"          - 启用时间线快照
+                # TIMELINE_CLEANUP="yes"         - 启用时间线清理
+                # NUMBER_LIMIT="10"              - 最多保留 10 个普通快照
+                # NUMBER_LIMIT_IMPORTANT="5"     - 最多保留 5 个重要快照
+                # TIMELINE_LIMIT_HOURLY="5"      - 每小时快照保留 5 个
+                # TIMELINE_LIMIT_DAILY="7"       - 每日快照保留 7 个
+                # TIMELINE_LIMIT_WEEKLY="0"      - 不保留每周快照
+                # TIMELINE_LIMIT_MONTHLY="0"     - 不保留每月快照
+                # TIMELINE_LIMIT_YEARLY="0"      - 不保留每年快照
+                snapper -c home set-config \
+                    ALLOW_GROUPS="wheel" \
+                    TIMELINE_CREATE="yes" \
+                    TIMELINE_CLEANUP="yes" \
+                    NUMBER_LIMIT="10" \
+                    NUMBER_LIMIT_IMPORTANT="5" \
+                    TIMELINE_LIMIT_HOURLY="5" \
+                    TIMELINE_LIMIT_DAILY="7" \
+                    TIMELINE_LIMIT_WEEKLY="0" \
+                    TIMELINE_LIMIT_MONTHLY="0" \
+                    TIMELINE_LIMIT_YEARLY="0"
+            fi
+        else
+            info "Config 'home' already exists"
+        fi
+    else
+        info "/home is not a separate mount point. Using root filesystem."
+    fi
+    
+    success "System snapshot configuration completed"
+    echo ""
+    
+    # 创建初始安全快照
+    print_section_title "Creating Initial Snapshots"
+    
+    # 检查是否已存在初始快照（避免重复创建）
+    local initial_snapshot_exists=false
+    
+    # 创建 Root 快照
+    if snapper list-configs 2>/dev/null | grep -q "^root "; then
+        # 检查是否已存在描述为 "Before Sycamore Arch Setup" 的快照
+        if snapper -c root list 2>/dev/null | grep -q "Before Sycamore Arch Setup"; then
+            info "Initial Root snapshot already exists, skipping creation"
+            initial_snapshot_exists=true
+        else
+            info "Creating Root snapshot..."
+            local root_snapshot=$(snapper -c root create --description "Before Sycamore Arch Setup" --cleanup-algorithm number --print-number 2>&1)
+            
+            if [[ $? -eq 0 ]]; then
+                success "Root snapshot created: #${root_snapshot}"
+            else
+                error "Failed to create Root snapshot"
+                warn "Cannot proceed without a safety snapshot. Aborting."
+                return 1
+            fi
+        fi
+    fi
+    
+    # 创建 Home 快照（如果配置存在）
+    if snapper list-configs 2>/dev/null | grep -q "^home "; then
+        # 检查是否已存在描述为 "Before Sycamore Arch Setup" 的快照
+        if snapper -c home list 2>/dev/null | grep -q "Before Sycamore Arch Setup"; then
+            info "Initial Home snapshot already exists, skipping creation"
+        else
+            info "Creating Home snapshot..."
+            local home_snapshot=$(snapper -c home create --description "Before Sycamore Arch Setup" --cleanup-algorithm number --print-number 2>&1)
+            
+            if [[ $? -eq 0 ]]; then
+                success "Home snapshot created: #${home_snapshot}"
+            else
+                error "Failed to create Home snapshot"
+                return 1
+            fi
+        fi
+    fi
+    
+    # 显示 Root 快照（使用 ISO 8601 时间格式）
+    if snapper list-configs 2>/dev/null | grep -q "^root "; then
+        info "Root snapshots:"
+        snapper --iso -c root list 2>/dev/null | tail -n +3 | while IFS= read -r line; do
+            echo -e "${DIM}  │ ${line}${RESET}"
         done
+    fi
+    
+    # 显示 Home 快照（如果存在，使用 ISO 8601 时间格式）
+    if snapper list-configs 2>/dev/null | grep -q "^home "; then
+        info "Home snapshots:"
+        snapper --iso -c home list 2>/dev/null | tail -n +3 | while IFS= read -r line; do
+            echo -e "${DIM}  │ ${line}${RESET}"
+        done
+    fi
+
+    if [[ "${initial_snapshot_exists}" == "true" ]]; then
+        success "Using existing initial snapshots"
+    else
+        success "Initial snapshots created successfully"
+    fi
+    echo ""
+}
+
+# 在包安装前创建快照
+create_pre_snapshot() {
+    local description="$1"
+    
+    debug "Creating pre-snapshot: ${description}"
+    
+    local snapshot_number=$(snapper -c root create --type pre --cleanup-algorithm number --description "${description}" --print-number 2>&1)
+    
+    if [[ $? -eq 0 ]]; then
+        echo "${snapshot_number}"
+        return 0
+    else
+        error "Failed to create pre-snapshot: ${snapshot_number}"
+        return 1
     fi
 }
 
-# 运行带进度记录的步骤
-# 用法: run_step "step_name" "function_name" ["description"]
-# 返回值: 0 表示成功（包括跳过），1 表示失败
-run_step() {
-    local step_name="$1"
-    local step_func="$2"
-    local description="${3:-${step_name}}"
+# 在包安装后创建快照
+create_post_snapshot() {
+    local pre_number="$1"
+    local description="$2"
     
-    # 检查是否已完成
-    if is_step_completed "${step_name}"; then
-        info "Skipping '${description}' ${DIM}(already completed)${RESET}"
+    debug "Creating post-snapshot paired with #${pre_number}: ${description}"
+    
+    local snapshot_number=$(snapper -c root create --type post --cleanup-algorithm number --pre-number "${pre_number}" --description "${description}" --print-number 2>&1)
+    
+    if [[ $? -eq 0 ]]; then
+        echo "${snapshot_number}"
         return 0
+    else
+        error "Failed to create post-snapshot: ${snapshot_number}"
+        return 1
+    fi
+}
+
+# 恢复到指定快照
+rollback_to_snapshot() {
+    local snapshot_number="$1"
+    
+    warn "Rolling back to snapshot #${snapshot_number}..."
+    
+    # 显示快照信息
+    info "Snapshot information:"
+    snapper -c root list | grep "^${snapshot_number} " | while IFS= read -r line; do
+        echo -e "${DIM}  │ ${line}${RESET}"
+    done
+    
+    # 执行回滚
+    run_command "snapper -c root undochange ${snapshot_number}..0" "Rolling back changes" || {
+        error "Failed to rollback to snapshot #${snapshot_number}"
+        return 1
+    }
+    
+    success "Successfully rolled back to snapshot #${snapshot_number}"
+    warn "Some changes may require a reboot to take full effect"
+    echo ""
+}
+
+# 检查步骤是否已完成（基于快照检查）
+# 用法: is_step_completed "description"
+is_step_completed() {
+    local description="$1"
+    
+    # 检查是否存在对应的 post-snapshot
+    if snapper -c root list 2>/dev/null | grep -q "After ${description}"; then
+        return 0  # 已完成
+    else
+        return 1  # 未完成
+    fi
+}
+
+# 检查是否存在未配对的 pre-snapshot（安装中断检测）
+# 用法: check_interrupted_snapshot "description"
+# 返回: 如果存在孤立的 pre-snapshot，输出其编号；否则返回空
+check_interrupted_snapshot() {
+    local description="$1"
+    
+    # 查找所有 pre-snapshot
+    while IFS= read -r line; do
+        local snap_num=$(echo "${line}" | awk '{print $1}')
+        local snap_type=$(echo "${line}" | awk '{print $2}')
+        local snap_desc=$(echo "${line}" | awk -F'|' '{print $NF}' | xargs)
+        
+        # 检查是否是目标 pre-snapshot
+        if [[ "${snap_type}" == "pre" ]] && [[ "${snap_desc}" == "Before ${description}" ]]; then
+            # 检查是否有配对的 post-snapshot
+            local has_post=$(snapper -c root list 2>/dev/null | grep "post" | grep -c "${snap_num}")
+            
+            if [[ ${has_post} -eq 0 ]]; then
+                # 找到孤立的 pre-snapshot
+                echo "${snap_num}"
+                return 0
+            fi
+        fi
+    done < <(snapper -c root list 2>/dev/null | tail -n +3)
+    
+    return 1
+}
+
+# 运行带快照保护的包安装步骤
+# 用法: run_step_with_snapshot "function_name" "description"
+run_step_with_snapshot() {
+    local step_func="$1"
+    local description="$2"
+    
+    # 检查是否已完成（基于快照）
+    if is_step_completed "${description}"; then
+        if [[ "${AUTO_INSTALL}" == "true" ]]; then
+            info "Skipping '${description}' ${DIM}(already completed)${RESET}"
+            return 0
+        else
+            # 交互模式：询问用户是否跳过
+            while true; do
+                read -p "$(echo -e "${PROMPT}Step '${description}' already completed. Skip? [Y/n]:${RESET} ")" choice
+                choice=${choice:-y}
+                case $choice in
+                    y|Y|yes|YES|"")
+                        info "Skipping '${description}'"
+                        return 0
+                        ;;
+                    n|N|no|NO)
+                        warn "Re-running '${description}'..."
+                        break
+                        ;;
+                    *)
+                        error "Invalid option. Please enter Y or N"
+                        ;;
+                esac
+            done
+        fi
+    fi
+    
+    # 检查是否存在未配对的 pre-snapshot（安装中断检测）
+    local interrupted_snapshot=$(check_interrupted_snapshot "${description}")
+    
+    if [[ -n "${interrupted_snapshot}" ]]; then
+        warn "Detected interrupted installation for '${description}'"
+        warn "Found orphaned pre-snapshot #${interrupted_snapshot}"
+        
+        # 显示快照信息
+        info "Snapshot details:"
+        snapper -c root list 2>/dev/null | grep "^${interrupted_snapshot} " | while IFS= read -r line; do
+            echo -e "${DIM}  │ ${line}${RESET}"
+        done
+        echo ""
+        
+        local do_rollback=false
+        
+        if [[ "${AUTO_INSTALL}" == "true" ]]; then
+            warn "Auto-install mode: automatically rolling back to pre-snapshot #${interrupted_snapshot}"
+            do_rollback=true
+        else
+            # 交互模式：询问用户如何处理
+            while true; do
+                echo -e "${PROMPT}How to handle the interrupted installation?${RESET}"
+                echo -e "  ${BOLD_WHITE}1)${RESET} Rollback to snapshot #${interrupted_snapshot} (recommended)"
+                echo -e "  ${BOLD_WHITE}2)${RESET} Delete old snapshot and continue with new installation"
+                read -p "$(echo -e "${PROMPT}Choose option [1/2]:${RESET} ")" choice
+                choice=${choice:-1}
+                case $choice in
+                    1)
+                        do_rollback=true
+                        break
+                        ;;
+                    2)
+                        info "Deleting orphaned snapshot #${interrupted_snapshot}..."
+                        snapper -c root delete "${interrupted_snapshot}" 2>/dev/null
+                        if [[ $? -eq 0 ]]; then
+                            success "Snapshot #${interrupted_snapshot} deleted"
+                        else
+                            warn "Failed to delete snapshot #${interrupted_snapshot}"
+                        fi
+                        break
+                        ;;
+                    *)
+                        error "Invalid option. Please enter 1 or 2"
+                        ;;
+                esac
+            done
+        fi
+        
+        if [[ "${do_rollback}" == "true" ]]; then
+            rollback_to_snapshot "${interrupted_snapshot}"
+            # 回滚后删除该快照
+            info "Cleaning up snapshot #${interrupted_snapshot}..."
+            snapper -c root delete "${interrupted_snapshot}" 2>/dev/null
+            success "System restored to pre-installation state"
+            return 0
+        fi
+    fi
+    
+    # 创建预快照
+    local pre_snapshot=$(create_pre_snapshot "Before ${description}")
+    
+    if [[ $? -ne 0 ]] || [[ -z "${pre_snapshot}" ]]; then
+        warn "Failed to create pre-snapshot, continuing without snapshot protection..."
+        pre_snapshot=""
+    else
+        debug "Pre-snapshot #${pre_snapshot} created for ${step_func}"
     fi
     
     # 执行步骤函数
     if "${step_func}"; then
-        mark_step_completed "${step_name}"
+        # 成功：创建后快照
+        if [[ -n "${pre_snapshot}" ]]; then
+            local post_snapshot=$(create_post_snapshot "${pre_snapshot}" "After ${description}")
+            if [[ $? -eq 0 ]]; then
+                debug "Post-snapshot #${post_snapshot} created for ${step_func}"
+            fi
+        fi
+        
         return 0
     else
+        # 失败：询问是否回滚
         error "Step '${description}' failed"
+        
+        if [[ -n "${pre_snapshot}" ]]; then
+            local do_rollback=false
+            
+            if [[ "${AUTO_INSTALL}" == "true" ]]; then
+                warn "Auto-install mode: automatically rolling back to pre-snapshot #${pre_snapshot}"
+                do_rollback=true
+            else
+                while true; do
+                    read -p "$(echo -e "${PROMPT}Rollback to snapshot #${pre_snapshot}? [Y/n]:${RESET} ")" choice
+                    choice=${choice:-y}
+                    case $choice in
+                        y|Y|yes|YES|"")
+                            do_rollback=true
+                            break
+                            ;;
+                        n|N|no|NO)
+                            info "Skipping rollback. You can manually rollback later with: snapper -c root undochange ${pre_snapshot}..0"
+                            break
+                            ;;
+                        *)
+                            error "Invalid option. Please enter Y or N"
+                            ;;
+                    esac
+                done
+            fi
+            
+            if [[ "${do_rollback}" == "true" ]]; then
+                rollback_to_snapshot "${pre_snapshot}"
+            fi
+        fi
+        
         return 1
     fi
 }
+
+# ==============================================================================
+# 基础系统配置
+# ==============================================================================
+
+# 基础系统配置函数
+setup_base_system() {
+    print_section_title "Base System Configuration"
+    
+    # ------------------------------------------------------------------------------
+    # 1. 设置全局默认编辑器
+    # ------------------------------------------------------------------------------
+    info "Step 1/5: Configuring global default editor"
+    
+    local target_editor="vim"
+    
+    if command -v nvim &> /dev/null; then
+        target_editor="nvim"
+        debug "Neovim detected"
+    elif command -v nano &> /dev/null; then
+        target_editor="nano"
+        debug "Nano detected"
+    else
+        info "Neovim or Nano not found. Installing Vim..."
+        if ! command -v vim &> /dev/null; then
+            run_command "pacman -Syu --noconfirm gvim" "Installing gvim" || return 1
+        fi
+    fi
+    
+    info "Setting EDITOR=${target_editor} in /etc/environment..."
+    
+    if grep -q "^EDITOR=" /etc/environment 2>/dev/null; then
+        sed -i "s/^EDITOR=.*/EDITOR=${target_editor}/" /etc/environment
+    else
+        echo "EDITOR=${target_editor}" >> /etc/environment
+    fi
+    success "Global EDITOR set to: ${target_editor}"
+    echo ""
+    
+    # ------------------------------------------------------------------------------
+    # 2. 启用 32-bit (multilib) 仓库
+    # ------------------------------------------------------------------------------
+    info "Step 2/5: Enabling multilib repository"
+    
+    if grep -q "^\[multilib\]" /etc/pacman.conf; then
+        success "[multilib] is already enabled"
+    else
+        info "Uncommenting [multilib]..."
+        sed -i "/\[multilib\]/,/Include/"'s/^#//' /etc/pacman.conf
+        
+        info "Refreshing package database..."
+        run_command "pacman -Sy" "Refreshing database" || return 1
+        success "[multilib] enabled"
+    fi
+    echo ""
+    
+    # ------------------------------------------------------------------------------
+    # 3. 安装基础字体
+    # ------------------------------------------------------------------------------
+    info "Step 3/5: Installing base fonts"
+    
+    run_command "pacman -Syu --noconfirm --needed adobe-source-han-serif-cn-fonts adobe-source-han-sans-cn-fonts noto-fonts-cjk noto-fonts noto-fonts-emoji" \
+        "Installing fonts" || return 1
+    success "Base fonts installed"
+    echo ""
+    
+    # ------------------------------------------------------------------------------
+    # 4. 配置 archlinuxcn 仓库
+    # ------------------------------------------------------------------------------
+    info "Step 4/5: Configuring ArchLinuxCN repository"
+    
+    if grep -q "\[archlinuxcn\]" /etc/pacman.conf; then
+        success "archlinuxcn repository already exists"
+    else
+        info "Adding archlinuxcn mirrors to pacman.conf..."
+        cat <<EOT >> /etc/pacman.conf
+
+[archlinuxcn]
+Server = https://mirrors.ustc.edu.cn/archlinuxcn/\$arch
+Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxcn/\$arch
+Server = https://mirrors.hit.edu.cn/archlinuxcn/\$arch
+Server = https://repo.huaweicloud.com/archlinuxcn/\$arch
+EOT
+        success "Mirrors added"
+    fi
+    
+    info "Installing archlinuxcn-keyring..."
+    run_command "pacman -Sy --noconfirm archlinuxcn-keyring" "Installing keyring" || return 1
+    success "ArchLinuxCN configured"
+    echo ""
+    
+    # ------------------------------------------------------------------------------
+    # 5. 安装 AUR 助手
+    # ------------------------------------------------------------------------------
+    info "Step 5/5: Installing AUR helpers"
+    
+    run_command "pacman -Syu --noconfirm --needed base-devel yay paru" \
+        "Installing yay and paru" || return 1
+    success "AUR helpers installed"
+    echo ""
+    
+    success "Base system configuration completed"
+    echo ""
+    return 0
+}
+
 
 # ==============================================================================
 # 主逻辑
@@ -653,18 +1061,27 @@ run_step() {
 
 main() {
     show_banner
-    system_information
-    check_root
-    check_system_requirements
-    prompt_auto_install
-    update_mirrorlist
-    update_system
 
-    # 初始化安装进度
-    init_progress
-        
-    # 安装完成后自动清理进度文件
-    cleanup_progress
+    # 系统信息
+    system_information
+
+    # 必要检查
+    check_system_requirements
+
+    # 安装模式选择
+    prompt_auto_install
+    
+    # 更新源
+    update_mirrorlist
+    
+    # 更新系统
+    update_system
+    
+    # 初始化 Btrfs 快照系统并创建初始快照
+    init_btrfs_snapshots
+
+    # 基础系统配置（使用快照保护）
+    run_step_with_snapshot "setup_base_system" "Base System Configuration"
 }
 
 # 捕获 Ctrl+C
