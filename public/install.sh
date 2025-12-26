@@ -1,8 +1,9 @@
 #!/bin/bash
+set -euo pipefail
 #
 # 名称:     Sycamore Arch Setup
 #
-# 用法:     bash <(curl -sL arch.sycamore.icu)
+# 用法:     bash <(curl -fsSL arch.sycamore.icu)
 #
 # ==============================================================================
 
@@ -11,8 +12,6 @@
 # ==============================================================================
 
 VERSION="0.1.0"
-AUTHER='Sycamore'
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AUTO_INSTALL=false
 # 开发模式通过环境变量 DEV_MODE=1 启用
 DEV_MODE="${DEV_MODE:-0}"
@@ -281,85 +280,61 @@ print_section_title() {
 }
 
 # 执行命令并限制日志输出
-# 用法: run_command "command" ["description"]
-# 示例: run_command "pacman -Syu --noconfirm" "Updating system packages"
+# 用法: run_command "description" command [args...]
+# 示例: run_command "Updating system packages" pacman -Syu --noconfirm
 run_command() {
-    local cmd="$1"
-    local description="${2:-Executing command}"
+    local description="${1:-Executing command}"
+    shift
+    local cmd=("$@")
     local max_lines=5
-    local tmp_output="/tmp/sycamore_cmd_$$.log"
     local line_count=0
     local buffer=()
-    
+
     info "${description}..."
-    debug "Command: ${cmd}"
-    
-    # 清空临时文件
-    > "${tmp_output}"
-    
+    info "Command: ${cmd[*]}"
+
     # 执行命令并捕获输出
     {
-        eval "${cmd}" 2>&1 | while IFS= read -r line; do
-            # 保存到临时文件
-            echo "${line}" >> "${tmp_output}"
-            
-            # 更新缓冲区（保持最后 max_lines 行）
-            buffer+=("${line}")
+        "${cmd[@]}" 2>&1 | while IFS= read -r line; do
+            # 更新缓冲区（保持最后 max_lines 行，截断超过80字符的行）
+            buffer+=("${line:0:80}")
             if [[ ${#buffer[@]} -gt ${max_lines} ]]; then
                 buffer=("${buffer[@]:1}")
             fi
-            
+
             # 清除之前的输出行
             if [[ ${line_count} -gt 0 ]]; then
                 for ((i=0; i<line_count; i++)); do
                     echo -ne "\033[1A\033[2K"
                 done
             fi
-            
+
             # 显示缓冲区内容
             line_count=${#buffer[@]}
             for output_line in "${buffer[@]}"; do
                 echo -e "${DIM}  │ ${output_line}${RESET}"
             done
         done
-        
+
         # 返回命令的退出状态
         return ${PIPESTATUS[0]}
     }
-    
+
     local exit_code=$?
-    
+
     # 清除最后显示的行
     if [[ ${line_count} -gt 0 ]]; then
         for ((i=0; i<line_count; i++)); do
             echo -ne "\033[1A\033[2K"
         done
     fi
-    
+
     if [[ ${exit_code} -eq 0 ]]; then
         success "${description} completed"
     else
         error "${description} failed (exit code: ${exit_code})"
-        
-        # 显示错误日志的最后10行
-        warn "Last 10 lines of output:"
-        tail -n 10 "${tmp_output}" | while IFS= read -r line; do
-            echo -e "${DIM}  │ ${line}${RESET}"
-        done
-        
-        # 询问是否查看完整日志
-        if [[ "${AUTO_INSTALL}" != "true" ]]; then
-            echo ""
-            read -p "$(echo -e "${PROMPT}View full log? [y/N]:${RESET} ")" view_log
-            if [[ "${view_log}" =~ ^[Yy]$ ]]; then
-                less "${tmp_output}"
-            fi
-        fi
     fi
-    
-    # 清理临时文件
-    rm -f "${tmp_output}"
-    
+
     return ${exit_code}
 } 
 
@@ -431,7 +406,7 @@ update_mirrorlist() {
         # 检查 reflector 是否安装
         if ! command -v reflector &> /dev/null; then
             warn "reflector not found. Installing reflector..."
-            run_command "pacman -Sy --noconfirm reflector" "Installing reflector" || {
+            run_command "Installing reflector" pacman -Sy --noconfirm reflector || {
                 error "Failed to install reflector"
                 return 1
             }
@@ -463,7 +438,7 @@ update_mirrorlist() {
         [[ -n "${country_code}" ]] && reflector_cmd+=" -c ${country_code}"
         
         # 执行 reflector 命令
-        run_command "${reflector_cmd}" "Updating mirror list" || {
+        run_command "Updating mirror list" ${reflector_cmd} || {
             error "Failed to update mirror list"
             return 1
         }
@@ -509,7 +484,7 @@ update_system() {
     
     # 执行更新
     if [[ "${do_update}" == "true" ]]; then
-        run_command "pacman -Syu --noconfirm" "Updating system packages" || {
+        run_command "Updating system packages" pacman -Syu --noconfirm || {
             error "Failed to update system"
             return 1
         }
@@ -529,7 +504,7 @@ init_btrfs_snapshots() {
     
     # 安装 Snapper 和 snap-pac
     info "Installing Snapper and snap-pac..."
-    run_command "pacman -Syu --noconfirm --needed snapper snap-pac" "Installing snapshot tools" || {
+    run_command "Installing snapshot tools" pacman -Syu --noconfirm --needed snapper snap-pac || {
         error "Failed to install Snapper"
         return 1
     }
@@ -549,7 +524,7 @@ init_btrfs_snapshots() {
         fi
         
         # 创建配置
-        if run_command "snapper -c root create-config /" "Creating Snapper configuration"; then
+        if run_command "Creating Snapper configuration" snapper -c root create-config /; then
             success "Config 'root' created"
             
             # 应用保留策略
@@ -594,7 +569,7 @@ init_btrfs_snapshots() {
                 rm -rf /home/.snapshots
             fi
             
-            if run_command "snapper -c home create-config /home" "Creating Home configuration"; then
+            if run_command "Creating Home configuration" snapper -c home create-config /home; then
                 success "Config 'home' created"
                 
                 # 应用与 root 相同的保留策略
@@ -644,7 +619,8 @@ init_btrfs_snapshots() {
             initial_snapshot_exists=true
         else
             info "Creating Root snapshot..."
-            local root_snapshot=$(snapper -c root create --description "Before Sycamore Arch Setup" --cleanup-algorithm number --print-number 2>&1)
+            local root_snapshot
+            root_snapshot=$(snapper -c root create --description "Before Sycamore Arch Setup" --cleanup-algorithm number --print-number 2>&1)
             
             if [[ $? -eq 0 ]]; then
                 success "Root snapshot created: #${root_snapshot}"
@@ -746,7 +722,7 @@ rollback_to_snapshot() {
     done
     
     # 执行回滚
-    run_command "snapper -c root undochange ${snapshot_number}..0" "Rolling back changes" || {
+    run_command "Rolling back changes" snapper -c root undochange ${snapshot_number}..0 || {
         error "Failed to rollback to snapshot #${snapshot_number}"
         return 1
     }
@@ -973,7 +949,7 @@ setup_base_system() {
     else
         info "Neovim or Nano not found. Installing Vim..."
         if ! command -v vim &> /dev/null; then
-            run_command "pacman -Syu --noconfirm gvim" "Installing gvim" || return 1
+            run_command "Installing gvim" pacman -Syu --noconfirm gvim || return 1
         fi
     fi
     
@@ -999,7 +975,7 @@ setup_base_system() {
         sed -i "/\[multilib\]/,/Include/"'s/^#//' /etc/pacman.conf
         
         info "Refreshing package database..."
-        run_command "pacman -Sy" "Refreshing database" || return 1
+        run_command "Refreshing database" pacman -Sy || return 1
         success "[multilib] enabled"
     fi
     echo ""
@@ -1009,8 +985,7 @@ setup_base_system() {
     # ------------------------------------------------------------------------------
     info "Step 3/5: Installing base fonts"
     
-    run_command "pacman -Syu --noconfirm --needed adobe-source-han-serif-cn-fonts adobe-source-han-sans-cn-fonts noto-fonts-cjk noto-fonts noto-fonts-emoji" \
-        "Installing fonts" || return 1
+    run_command "Installing fonts" pacman -Syu --noconfirm --needed adobe-source-han-serif-cn-fonts adobe-source-han-sans-cn-fonts noto-fonts-cjk noto-fonts noto-fonts-emoji || return 1
     success "Base fonts installed"
     echo ""
     
@@ -1035,7 +1010,7 @@ EOT
     fi
     
     info "Installing archlinuxcn-keyring..."
-    run_command "pacman -Sy --noconfirm archlinuxcn-keyring" "Installing keyring" || return 1
+    run_command "Installing keyring" pacman -Sy --noconfirm archlinuxcn-keyring || return 1
     success "ArchLinuxCN configured"
     echo ""
     
@@ -1044,8 +1019,7 @@ EOT
     # ------------------------------------------------------------------------------
     info "Step 5/5: Installing AUR helpers"
     
-    run_command "pacman -Syu --noconfirm --needed base-devel yay paru" \
-        "Installing yay and paru" || return 1
+    run_command "Installing yay and paru" pacman -Syu --noconfirm --needed base-devel yay paru || return 1
     success "AUR helpers installed"
     echo ""
     
